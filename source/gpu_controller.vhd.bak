@@ -1,0 +1,206 @@
+-- $Id: $
+-- File name:   gpu_controller
+-- Created:     11/2/2010
+-- Author:      Vishal Gala
+-- Lab Section: 04
+-- Version:     1.0  Initial Design Entry
+-- Description: The controller for the GPU
+
+
+LIBRARY IEEE;
+USE IEEE.std_logic_1164.ALL;
+USE IEEE.STD_LOGIC_ARITH.ALL;
+USE IEEE.STD_LOGIC_UNSIGNED.ALL;
+entity  gpu_controller is
+
+	port (  databus :inout std_logic_vector(15 downto 0); --- micro input
+		strb_in : in std_logic; --- micro input
+		clk : in std_logic;  --- 
+		rst_n : in std_logic;
+            gpu_done: out std_logic; -- output to micro to say gpu is executing the instrcution/free
+            ram_in_use: in std_logic;
+             
+		---- raster signals
+		rast_done: in std_logic;
+		init_rast: out std_logic;
+		rast_addr: in std_logic_vector(15 downto 0);
+		rast_strb: in std_logic;
+		rast_index: in std_logic_vector(4 downto 0);
+		---- math signals
+		math_done : in std_logic;
+		init_math: out std_logic;
+		strb_matrix: out std_logic;
+		strb_cor: out std_logic;
+		-----The output address
+		addr_out: out std_logic_vector(15 downto 0);
+		re_out :out std_logic;
+		databus_out : out std_logic_vector(15 downto 0)
+	  );
+end gpu_controller; 
+
+architecture struct of gpu_controller is
+constant loadmatrix : STD_LOGIC_VECTOR (15 downto 0):=x"0001"; 
+constant loadline : STD_LOGIC_VECTOR (15 downto 0):=x"0002"; 
+ type stateType is (idle,get_opcode,get_addr,memcont,math_act,rasterize,wait_state,delaystate,latchdata);
+  signal state, nextstate : stateType;
+signal tem ,tem2,op_strb,strb_reg1,strb_reg2,strb :std_logic;
+signal op_code_reg1,op_code_reg2,op_code: std_logic_vector (15 downto 0);
+signal op_in,nextopcode,opcode,nextaddr: std_logic_vector(15 downto 0);
+signal addr: std_logic_vector(15 downto 0);
+signal counter,nextcounter : std_logic_vector (4 downto 0);
+signal re: std_logic;
+begin
+dataa: process(re,ram_in_use,rasterize_input,databus)
+begin
+
+	if ram_in_use = '0' then 
+		if re = '0' then
+			databus <= rasterize_input;	
+		end if;
+	else
+		databus <= (others => 'Z');	
+	end if;
+
+end process dataa;
+	databus_out <= databus;
+reg: process(clk,op_strb)
+begin
+        if rst_n = '0' then
+	   state <= idle;
+           op_in <= (others => '0');
+           opcode <= (others => '0');
+           addr <= x"0000";
+           ------ for detecting the strobe 
+           tem <= '0';
+           tem2 <= '0';
+           counter <= (others => '0');
+           
+	elsif rising_edge(clk) then
+               opcode <= nextopcode;
+               addr <= nextaddr;
+		if(op_strb = '1') then
+			op_in <= op_code;	
+		end if;
+		state <= nextstate;
+		tem2 <= tem;
+            tem <= strb;
+            counter <= nextcounter;
+	end if;
+end process reg;
+addr_put: process(ram_in_use,addr)
+begin
+	case ram_in_use is
+		when '0' =>
+			addr_out <= addr;
+			re_out <= re;
+		when others =>	
+			re_out <= 'Z';
+			addr_out <= "ZZZZZZZZZZZZZZZZ";
+	end case;
+
+end process addr_put;
+comb: process (state,op_strb,op_in,ram_in_use,rast_done,math_done,addr,counter,opcode)
+begin
+     nextopcode <= opcode;
+	nextaddr <=  addr;
+	nextcounter <= counter;
+        nextstate <= state;
+        init_math <= '0';
+        gpu_done <= '0';
+        init_rast <= '0';
+        re <= '1';
+        strb_cor <= '0';
+        strb_matrix <= '0';
+	case state is
+  
+	when idle =>
+		nextcounter <= (others => '0');
+		gpu_done <= '1';
+           if(op_strb = '1') then
+           	gpu_done <= '0';
+		nextstate <= get_opcode;
+           else 
+            	nextstate <= idle;
+           end if;
+	when get_opcode =>
+           nextopcode <= op_in;
+           if(op_strb = '1') then 
+		nextstate <= get_addr;
+	   end if;
+        when get_addr=>
+		nextaddr <= op_in;
+		nextstate <= wait_state;
+	when wait_state =>
+	     if ram_in_use = '0' then
+	     		nextstate <= memcont;
+	     end if;
+	when memcont =>
+		if counter = "10000" and opcode = loadmatrix then  
+			nextstate <= idle;
+		elsif counter = "00110" and opcode = loadline then
+			nextstate <= math_act;
+		elsif opcode = loadline or opcode = loadmatrix then
+			re <= '1';
+           		nextstate <= delaystate;
+           	else
+           		nextstate <= idle;
+         	end if;
+           		
+           		
+      when delaystate =>
+      		re <= '1';
+      	nextstate <= latchdata;
+      when latchdata => 
+      		re <= '1';
+      	if opcode = loadmatrix then
+      		strb_matrix <= '1';
+      	elsif opcode = loadline then 
+      		strb_cor <= '1';
+      	end if;
+      	nextstate <= memcont;
+      	nextaddr <= addr + 1;
+      	nextcounter <= counter + 1;
+      when math_act =>
+      	init_math <= '1';
+           if math_done = '1' then
+              nextstate <= rasterize;
+              init_rast <= '1';
+           end if;
+      when rasterize =>
+    		  init_rast <= '1';
+    		  if rast_done = '1' then 
+    		  nextstate <= idle;
+    		  end if;
+
+        end case;
+end process comb;
+----- process dectedting the strobe.
+edge: process (tem,tem2)
+    begin
+   op_strb <= not tem2 and tem;
+end process edge;
+sync: process (clk, rst_n)
+  begin  
+    if rst_n = '0' then                  
+	op_code_reg1 <= x"0000";
+	strb_reg1 <= '0';
+    elsif clk'event and clk = '1' then  
+	op_code_reg1 <= databus;   
+		strb_reg1 <= strb_in;
+    end if;
+
+  end process sync;
+syncc: process (clk, rst_n)
+  begin  
+    if rst_n = '0' then                  
+	op_code_reg2 <= x"0000";
+	strb_reg2 <= '0';
+    elsif clk'event and clk = '1' then  
+	op_code_reg2 <= op_code_reg1;   
+	strb_reg2 <= strb_reg1;
+    end if;
+  end process syncc;
+   op_code <= op_code_reg2;
+   strb <= strb_reg2;
+end struct;
+
